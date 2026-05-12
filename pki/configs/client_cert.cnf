@@ -1,0 +1,18 @@
+# pki/configs/client_cert.cnf
+[ req ]
+default_bits        = 4096
+prompt              = no
+default_md          = sha256
+distinguished_name  = dn
+req_extensions      = v3_req
+
+[ dn ]
+C  = RU
+ST = Moscow
+O  = VPN Research Lab
+OU = Client
+CN = vpn-client.vpn.internal
+
+[ v3_req ]
+keyUsage         = critical, nonRepudiation, digitalSignature, keyEncipherment
+extendedKeyUsage = clientAuth

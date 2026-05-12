@@ -1,0 +1,183 @@
+version: '3.9'
+
+networks:
+  vpn_internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+volumes:
+  redis_data:
+  vault_data:
+  vault_logs:
+  caddy_data:
+  caddy_config:
+  pki_certs:
+
+services:
+
+  # ─────────────────────────────────────────────
+  # Redis — session & refresh token storage
+  # ─────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: vpn_redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-s3cret}
+      --appendonly yes
+      --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    networks:
+      vpn_internal:
+        ipv4_address: 172.20.0.10
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-s3cret}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # Vault — PKI & secrets management
+  # ─────────────────────────────────────────────
+  vault:
+    image: hashicorp/vault:1.16
+    container_name: vpn_vault
+    restart: unless-stopped
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_TOKEN:-root-dev-token}
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+      VAULT_ADDR: "http://0.0.0.0:8200"
+    volumes:
+      - vault_data:/vault/data
+      - vault_logs:/vault/logs
+      - ./docker/vault/config.hcl:/vault/config/config.hcl:ro
+      - ./docker/vault/policies:/vault/policies:ro
+    ports:
+      - "8200:8200"
+    networks:
+      vpn_internal:
+        ipv4_address: 172.20.0.11
+    command: server -dev
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─────────────────────────────────────────────
+  # Vault init — bootstraps PKI engine
+  # ─────────────────────────────────────────────
+  vault_init:
+    build:
+      context: ./docker/vault-init
+      dockerfile: Dockerfile
+    container_name: vpn_vault_init
+    environment:
+      VAULT_ADDR: "http://vault:8200"
+      VAULT_TOKEN: ${VAULT_TOKEN:-root-dev-token}
+    volumes:
+      - pki_certs:/certs
+    networks:
+      vpn_internal:
+    depends_on:
+      vault:
+        condition: service_healthy
+    restart: "no"
+
+  # ─────────────────────────────────────────────
+  # VPN Server
+  # ─────────────────────────────────────────────
+  vpn_server:
+    build:
+      context: .
+      dockerfile: docker/server/Dockerfile
+    container_name: vpn_server
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    environment:
+      LISTEN_ADDR:    "0.0.0.0:8443"
+      REDIS_ADDR:     "redis:6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-s3cret}
+      VAULT_ADDR:     "http://vault:8200"
+      VAULT_TOKEN:    ${VAULT_TOKEN:-root-dev-token}
+      TUN_SUBNET:     "10.8.0.0/24"
+      TUN_GW:         "10.8.0.1"
+      LOG_LEVEL:      "info"
+    volumes:
+      - pki_certs:/certs:ro
+    ports:
+      - "8443:8443"
+    networks:
+      vpn_internal:
+        ipv4_address: 172.20.0.20
+    depends_on:
+      redis:
+        condition: service_healthy
+      vault_init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-k", "https://localhost:8443/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # Caddy — reverse proxy / TLS termination
+  # ─────────────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    container_name: vpn_caddy
+    restart: unless-stopped
+    environment:
+      VPN_SERVER_ADDR: "vpn_server:8443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - pki_certs:/certs:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "443:443"
+      - "80:80"
+    networks:
+      vpn_internal:
+        ipv4_address: 172.20.0.30
+    depends_on:
+      vpn_server:
+        condition: service_healthy
+
+  # ─────────────────────────────────────────────
+  # VPN Client (demo container)
+  # ─────────────────────────────────────────────
+  vpn_client:
+    build:
+      context: .
+      dockerfile: docker/client/Dockerfile
+    container_name: vpn_client
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    environment:
+      SERVER_ADDR:    "vpn_server:8443"
+      VAULT_ADDR:     "http://vault:8200"
+      VAULT_TOKEN:    ${VAULT_TOKEN:-root-dev-token}
+      CLIENT_NAME:    "demo-client"
+      LOG_LEVEL:      "info"
+    volumes:
+      - pki_certs:/certs:ro
+    networks:
+      vpn_internal:
+        ipv4_address: 172.20.0.40
+    depends_on:
+      vpn_server:
+        condition: service_healthy

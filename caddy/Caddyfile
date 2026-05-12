@@ -1,0 +1,44 @@
+# caddy/Caddyfile — Reverse proxy with mTLS for the VPN management API
+{
+    # Global options
+    admin off
+    log {
+        output stdout
+        format json
+        level INFO
+    }
+}
+
+# ── Management API — mTLS enforced ───────────────────────────────────────────
+vpn.internal:443 {
+    tls /certs/server.pem /certs/server.key {
+        # Require client certificate signed by our CA
+        client_auth {
+            mode                 require_and_verify
+            trusted_ca_cert_file /certs/ca.pem
+        }
+        protocols tls1.3
+    }
+
+    # Reverse proxy to the VPN server's internal HTTP management port
+    reverse_proxy vpn_server:8080 {
+        header_up X-Client-Cert        {tls_client_certificate_der_base64}
+        header_up X-Client-Serial      {tls_client_serial}
+        header_up X-Client-Subject     {tls_client_subject}
+        header_up X-Forwarded-For      {remote_host}
+        header_up X-Real-IP            {remote_host}
+    }
+
+    log {
+        output stdout
+        format json
+    }
+}
+
+# ── Health check endpoint — no mTLS ─────────────────────────────────────────
+:80 {
+    respond /health 200 {
+        body "OK"
+    }
+    respond 404
+}

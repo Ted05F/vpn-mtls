@@ -1,0 +1,19 @@
+# Локальный toolchain Go (не коммитить — десятки MB / GB)
+.tools/
+
+# Собранные бинарники
+/vpn-server
+/vpn-client
+*.exe
+
+# IDE / ОС
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Секреты и локальные env
+.env
+.env.*
+*.pem
+!**/testdata/*.pem
